@@ -1,5 +1,10 @@
 # AI-powered-Personal-Schedule-Assistant
-Xây dựng AI Agent đề xuất lịch trình cá nhân sử dụng framework LangChain kết hợp vơi RÀG và mô hình ngôn ngữ lớn Qwen
+
+[![Code](https://img.shields.io/badge/GitHub-Repository-black)](https://github.com/anbinnguyen24/AI-powered-Personal-Schedule-Assistant)
+[![LLM](https://img.shields.io/badge/LLM-Qwen3--235B-orange)](https://huggingface.co/Qwen/Qwen3-235B-A22B)
+
+## 📖 Introduction
+Xây dựng AI Agent đề xuất lịch trình cá nhân sử dụng framework LangChain kết hợp vơi RAG và mô hình ngôn ngữ lớn Qwen
 
 Để chạy dự án này, bạn cần thiết lập các biến môi trường trong file `.env` như sau:
 
