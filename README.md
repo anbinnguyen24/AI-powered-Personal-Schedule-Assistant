@@ -8,3 +8,17 @@ HF_TOKEN=your_huggingface_token_here
 ```
 
 Thay `your_huggingface_token_here` bằng token thực tế của bạn từ [Hugging Face Tokens](https://huggingface.co/settings/tokens).
+
+## Cài đặt
+Để cài đặt các phụ thuộc cần thiết, bạn có thể sử dụng pip:
+
+```bash
+pip install -r requirements.txt
+```
+
+## Sử dụng
+Chạy file `frontend1.py` để khởi động dự án:
+
+```bash
+streamlit run frontend1.py
+```
