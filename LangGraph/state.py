@@ -8,16 +8,10 @@ from langchain_openai import ChatOpenAI
 import os
 from dotenv import load_dotenv
 import json
-
+from langchain_ollama import ChatOllama
 load_dotenv()
 
-# --- CẤU HÌNH MODEL-------------------
-llm = ChatOpenAI(
-    base_url="https://router.huggingface.co/v1",
-    api_key=os.environ.get("HF_TOKEN"),
-    model="Qwen/Qwen2.5-72B-Instruct",
-    temperature=0.1
-)
+llm = ChatOllama(model="llama3.1")
 
 class ScheduleIntent(TypedDict):
     action: Literal["create", "update", "delete", "query", "optimize"]
@@ -32,45 +26,13 @@ class ScheduleAgentState(TypedDict):
     is_approved: bool
 
 # ---BUILD NODES---
-# def analyze_request(state: ScheduleAgentState):
-#     structured_llm = llm.with_structured_output(ScheduleIntent)
-#     user_msg = state["messages"][-1].content
-#     result = structured_llm.invoke(f"Phân tích yêu cầu sau để quản lý lịch trình: {user_msg}")
-#
-#     return Command(update={"Đang xử lí yêu cầu": result}, goto="calendar_check")
-
-
 def analyze_request(state: ScheduleAgentState):
+    structured_llm = llm.with_structured_output(ScheduleIntent)
     user_msg = state["messages"][-1].content
+    result = structured_llm.invoke(f"Phân tích yêu cầu sau để quản lý lịch trình: {user_msg}")
 
-    # Thay vì dùng structured_llm, ta dùng prompt ép LLM trả về JSON
-    prompt = f"""
-    Bạn là chuyên gia phân tích lịch trình. Hãy phân tích yêu cầu sau và trả về DUY NHẤT một chuỗi JSON.
-    Yêu cầu: "{user_msg}"
+    return Command(update={"Đang xử lí yêu cầu": result}, goto="calendar_check")
 
-    Định dạng JSON mẫu:
-    {{
-        "action": "create",
-        "urgency": "medium",
-        "entities": {{"time": "10:00", "task": "họp nhóm"}}
-    }}
-    """
-
-    # Gọi LLM như bình thường
-    response = llm.invoke(prompt)
-
-    try:
-        # Cố gắng chuyển văn bản của LLM thành Dictionary
-        # Ta dùng hàm json.loads để "dịch" chuỗi văn bản thành dict
-        result = json.loads(response.content)
-    except:
-        # Nếu LLM trả về văn bản thừa, ta gán giá trị mặc định để không bị lỗi
-        result = {"action": "query", "urgency": "low", "entities": {}}
-
-    return Command(
-        update={"classification": result},
-        goto="calendar_check"
-    )
 
 def calendar_check(state: ScheduleAgentState):
     #giả định
@@ -94,18 +56,13 @@ def schedule_advisor(state: ScheduleAgentState):
     return Command(update={"proposed_schedule": {"content": response.content}}, goto="human_review")
 
 def human_review(state: ScheduleAgentState):
-    # Lấy bản nháp đã được tạo từ bước trước
     draft = state.get("proposed_schedule", {})
-
-    # interrupt() sẽ 'đóng băng' Agent và lưu mọi thứ vào MemorySaver.
-    # Khi em chạy app, nó sẽ dừng tại đây và trả về dữ liệu này cho giao diện.
     decision = interrupt({
         "info": "Tôi đã lập xong bản nháp lịch trình. Bạn có đồng ý cập nhật không?",
         "proposed_schedule": draft
     })
 
     if decision.get("approved") is True:
-        # Nếu đồng ý, ta đánh dấu là đã duyệt và đi đến nút cập nhật
         return Command(
             update={"is_approved": True},
             goto="update_save_response"
@@ -149,7 +106,6 @@ memory = MemorySaver()
 app = workflow.compile(checkpointer=memory)
 
 
-# --- SCRIPT CHẠY DEMO TRÊN TERMINAL ---
 def run_demo():
     # 1. Khởi tạo trạng thái ban đầu
     # Giả sử Agent đã chạy qua các bước trước và đã có bản nháp (proposed_schedule)
@@ -179,9 +135,7 @@ def run_demo():
 
         # Lấy tương tác từ Terminal
         user_choice = input("\nBạn có đồng ý với lịch trình này không? (y/n): ").strip().lower()
-
         if user_choice == 'y':
-            # Gửi lệnh 'resume' kèm dữ liệu phê duyệt vào Agent
             print("\n=> Đang gửi lệnh ĐỒNG Ý tới Agent...")
             app.invoke(Command(resume={"approved": True}), config)
         else:
@@ -193,7 +147,6 @@ def run_demo():
     if "messages" in final_state.values:
         print("\n=== PHẢN HỒI CUỐI CÙNG ===")
         print(final_state.values["messages"][-1].content)
-
 
 # Chạy demo
 if __name__ == "__main__":
