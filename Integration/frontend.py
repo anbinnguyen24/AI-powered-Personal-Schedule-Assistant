@@ -153,7 +153,10 @@ if user_input := st.chat_input("Hôm nay tôi có lịch gì không?", accept_fi
                 image_bytes = user_input.files[0].read()
                 
                 # Gọi hàm OCR
-                image_response = process_image_and_add_to_calendar(image_bytes, current_time_str)
+                image_response = process_image_and_add_to_calendar.invoke({
+                    "image_bytes": image_bytes, 
+                    "current_time": current_time_str
+                })
                 
                 st.markdown(image_response)
                 st.session_state.messages.append({"role": "assistant", "content": image_response})
