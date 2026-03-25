@@ -1,10 +1,6 @@
-from tavily import TavilyClient
-from langchain.tools import tool
-
-tavily = TavilyClient(api_key="your_key")
-
-@tool
-def research_topic(query: str) -> str:
-    """Research topic/event on internet."""
-    results = tavily.search(query)
-    return f"Research '{query}': {results}"
+from langchain_community.tools import DuckDuckGoSearchResults
+from ddgs import DDGS
+web_search_tool = DuckDuckGoSearchResults(
+    max_results=3,
+    description="Tìm kiếm thông tin, tin tức, sự kiện trên Internet."
+)

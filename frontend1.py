@@ -1,80 +1,46 @@
 import streamlit as st
 import uuid
-from dotenv import load_dotenv
-from src.graph.workflow import create_scheduling_workflow
-import src.rag_pipeline as rag
+from langchain_core.messages import HumanMessage, AIMessage
+from src.graph.workflow import app
 
-load_dotenv()
-
-
-@st.cache_resource
-def get_graph():
-    return create_scheduling_workflow()
-
-
-main_agent = get_graph()
-
-st.set_page_config(page_title="AI Schedule & RAG Agent", page_icon="📅", layout="centered")
-st.title("📅 AI Personal Schedule & Advisor (RAG)")
+st.set_page_config(page_title="Trợ lý Lịch trình AI", page_icon="📅")
+st.title("📅 Trợ lý Quản lý Lịch trình Thông minh")
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
 
-with st.sidebar:
-    st.header("System Controls")
-    st.info(f"Thread ID: {st.session_state.thread_id[:8]}...")
+config = {"configurable": {"thread_id": st.session_state.thread_id}}
 
-    st.divider()
-    st.write("**Quản lý Dữ liệu (RAG)**")
-    if st.button("Nạp file PDF vào Vector DB", type="primary", use_container_width=True):
-        with st.spinner("Đang đọc và băm tài liệu..."):
-            success = rag.build_vector_database()
-            if success:
-                st.success("Nạp dữ liệu RAG thành công!")
-            else:
-                st.error("Lỗi: Không tìm thấy PDF trong thư mục data/")
+for msg in st.session_state.messages:
+    role = "user" if isinstance(msg, HumanMessage) else "assistant"
+    with st.chat_message(role):
+        st.markdown(msg.content)
 
-    st.divider()
-    if st.button("🗑️ Xóa lịch sử chat", use_container_width=True):
-        st.session_state.messages = []
-        st.session_state.thread_id = str(uuid.uuid4())
-        st.rerun()
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if prompt := st.chat_input("VD: Đặt lịch họp dự án chiều mai. Công ty có cho phép họp sau 5h không?"):
-    st.session_state.messages.append({"role": "user", "content": prompt})
+if prompt := st.chat_input("Nhập yêu cầu (VD: Tìm tin tức hôm nay / Lên lịch học)..."):
+    st.session_state.messages.append(HumanMessage(content=prompt))
     with st.chat_message("user"):
         st.markdown(prompt)
 
     with st.chat_message("assistant"):
-        placeholder = st.empty()
-        full_response = ""
-
-        config = {"configurable": {"thread_id": st.session_state.thread_id}}
-        inputs = {"messages": [("user", prompt)]}
-
-        with st.status("AI đang xử lý...", expanded=True) as status:
+        with st.spinner("AI đang xử lý..."):
             try:
-                for chunk in main_agent.stream(inputs, config=config, stream_mode="updates"):
-                    for node_name, value in chunk.items():
-                        st.write(f"⚙️ Action: **{node_name}**...")
-                        if "messages" in value and value["messages"]:
-                            last_msg = value["messages"][-1]
-                            if hasattr(last_msg, 'content'):
-                                full_response = last_msg.content
-                            else:
-                                full_response = str(last_msg)
+                events = app.stream(
+                    {"messages": [HumanMessage(content=prompt)]},
+                    config=config,
+                    stream_mode="values"
+                )
 
-                status.update(label="Đã hoàn tất!", state="complete", expanded=False)
+                final_response = ""
+                for event in events:
+                    if "messages" in event:
+                        latest_msg = event["messages"][-1]
+                        if latest_msg.type != "human":
+                            final_response = latest_msg.content
+
+                if final_response:
+                    st.markdown(final_response)
+                    st.session_state.messages.append(AIMessage(content=final_response))
             except Exception as e:
-                st.error(f"Hệ thống gặp sự cố: {e}")
-                status.update(label="Lỗi xử lý", state="error", expanded=False)
-
-        if full_response:
-            placeholder.markdown(full_response)
-            st.session_state.messages.append({"role": "assistant", "content": full_response})
+                st.error(f"Lỗi hệ thống: {str(e)}\nHãy kiểm tra lại API Key trong file .env")

@@ -1,24 +1,22 @@
-# File: src/tools/rag_tool.py
 from langchain_core.tools import tool
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
+import os
 
 DB_DIR = "./chroma_db"
 
-
 @tool
 def consult_guidelines(query: str) -> str:
+    """Tra cứu thông tin nội bộ, quy định, hoặc tài liệu từ Vector Database."""
+    if not os.path.exists(DB_DIR):
+        return "Lỗi: Chưa có Database. Hãy chạy src/rag_pipeline.py trước."
     try:
         embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2")
         vectorstore = Chroma(persist_directory=DB_DIR, embedding_function=embeddings)
-
-        # Tìm 5 đoạn văn bản liên quan nhất
-        docs = vectorstore.similarity_search(query, k=5)
-
+        docs = vectorstore.similarity_search(query, k=3)
         if not docs:
-            return "Không tìm thấy quy định nào liên quan trong tài liệu nội bộ."
-
-        result = "\n\n".join([f"Trích xuất {i + 1}:\n{doc.page_content}" for i, doc in enumerate(docs)])
-        return f"Dữ liệu tìm thấy từ tài liệu (Hãy dựa vào đây để tư vấn):\n{result}"
+            return "Không tìm thấy thông tin trong tài liệu."
+        result = "\n\n".join([f"- {doc.page_content}" for doc in docs])
+        return f"Dữ liệu từ tài liệu:\n{result}"
     except Exception as e:
-        return f"Lỗi khi truy xuất tài liệu: {str(e)}"
+        return f"Lỗi truy xuất: {str(e)}"
