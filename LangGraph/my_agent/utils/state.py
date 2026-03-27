@@ -22,5 +22,11 @@ class ScheduleAgentState(TypedDict):
     # Lịch trình gợi ý từ AI
     proposed_schedule: Optional[dict]
 
+    # Lịch gốc do người dùng yêu cầu (giữ nguyên để làm mốc khi cần gợi ý lại)
+    requested_schedule: Optional[dict]
+
+    # Số lần người dùng từ chối bản nháp
+    review_attempts: int
+
     # Người dùng có đồng ý bản nháp lịch không
     is_approved: bool

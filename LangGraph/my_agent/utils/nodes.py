@@ -41,11 +41,15 @@ Câu người dùng: {user_msg}
         "date": parsed_result["date"],
         "content": user_msg,
     }
+    print(f"DEBUG: Phân tích yêu cầu, intent: {intent_result}, lịch trích xuất: {extracted_schedule}")
 
     return Command(
         update={
             "classification": intent_result,
             "proposed_schedule": extracted_schedule,
+            "requested_schedule": extracted_schedule,
+            "review_attempts": 0,
+            "is_approved": False,
         },
         goto="calendar_check",
     )
@@ -61,11 +65,13 @@ def calendar_check(state: ScheduleAgentState):
 def schedule_advisor(state: ScheduleAgentState):
     intent = state["classification"]
     calendar = state.get("calendar_data", [])
-    new_event = state.get("proposed_schedule")
+    requested_event = state.get("requested_schedule") or state.get("proposed_schedule")
+    new_event = requested_event
     initial_conflict = None
+    review_attempts = state.get("review_attempts", 0)
 
-    # Ưu tiên chính lịch người dùng đã nêu nếu đủ thông tin và không trùng.
-    if new_event and new_event.get("date") and new_event.get("time"):
+    # Chỉ ưu tiên lịch người dùng nhập ở lần đề xuất đầu tiên.
+    if review_attempts == 0 and new_event and new_event.get("date") and new_event.get("time"):
         initial_conflict = check_schedule_conflict(new_event, calendar)
         if not initial_conflict:
             return Command(update={"proposed_schedule": new_event}, goto="human_review")
@@ -74,6 +80,15 @@ def schedule_advisor(state: ScheduleAgentState):
     user_schedule_hint = ""
     if new_event and "content" in new_event:
         user_schedule_hint = new_event.get("content", "")
+
+    rejected_note = ""
+    previous_proposal = state.get("proposed_schedule")
+    if review_attempts > 0 and isinstance(previous_proposal, dict):
+        rejected_note = (
+            f"Người dùng vừa từ chối lịch: {previous_proposal.get('event', 'Sự kiện')} lúc "
+            f"{previous_proposal.get('time', '--:--')} ngày {previous_proposal.get('date', '----/--/--')}. "
+            "Hãy đề xuất lịch khác rõ ràng so với lịch vừa bị từ chối."
+        )
 
     structured_llm = llm.with_structured_output(ProposedEvent)
     conflict_note = ""
@@ -85,6 +100,7 @@ def schedule_advisor(state: ScheduleAgentState):
 Người dùng muốn: {intent['action']} cho việc {intent['entities']}.
 Lịch hiện tại: {calendar}
 Gợi ý thêm từ người dùng: {user_schedule_hint}
+{rejected_note}
 {conflict_note}
 
 Hãy đề xuất 1 lịch mới KHÔNG bị trùng.
@@ -146,10 +162,27 @@ def human_review(state: ScheduleAgentState):
     })
     if decision.get("approved") is True:
         return Command(update={"is_approved": True}, goto="update_save_response")
+
+    attempts = state.get("review_attempts", 0) + 1
+    if attempts < 3:
+        return Command(
+            update={
+                "is_approved": False,
+                "review_attempts": attempts,
+                "messages": [
+                    AIMessage(content=f"Bạn chưa đồng ý (lần {attempts}/3). Mình sẽ gợi ý một lịch khác.")
+                ],
+            },
+            goto="schedule_advisor",
+        )
+
     return Command(
         update={
             "is_approved": False,
-            "messages": [AIMessage(content="Đã hủy cập nhật lịch theo lựa chọn của bạn.")],
+            "review_attempts": attempts,
+            "messages": [
+                AIMessage(content="Bạn đã từ chối 3 lần. Mình dừng cập nhật lịch và giữ nguyên dữ liệu hiện tại.")
+            ],
         },
         goto=END,
     )

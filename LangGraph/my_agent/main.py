@@ -15,15 +15,18 @@ config = {"configurable": {"thread_id": "demo_001"}}
 for _ in app.stream(input_data, config):
     pass
 
-state = app.get_state(config)
-if state.next and state.next[0] == "human_review":
+while True:
+    state = app.get_state(config)
+    if not (state.next and state.next[0] == "human_review"):
+        break
+
     draft = state.values.get("proposed_schedule", {})
     draft_text = draft.get("content") or (
         f"{draft.get('event', 'Sự kiện')} lúc {draft.get('time', '--:--')} ngày {draft.get('date', '----/--/--')}"
     )
     print(f"Bản nháp: {draft_text}")
     user_choice = input("Bạn có đồng ý không? (y/n): ").strip().lower()
-    app.invoke(Command(resume={"approved": user_choice=='y'}), config)
+    app.invoke(Command(resume={"approved": user_choice == 'y'}), config)
 
 final_state = app.get_state(config)
 if "messages" in final_state.values:
