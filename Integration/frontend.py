@@ -5,11 +5,15 @@ from datetime import datetime
 from streamlit_autorefresh import st_autorefresh
 from agents import main_agent
 from tools import vector_db
+import os
+
+TEMP_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "temp_files")
+os.makedirs(TEMP_DIR, exist_ok=True)
 
 st.set_page_config(page_title="AI Schedule Agent", layout="wide")
 
 # Thiết lập tự động làm mới giao diện mỗi 60 giây (60000 milliseconds) để kiểm tra nhắc nhở
-count = st_autorefresh(interval=60000, limit=None, key="schedule_refresher")
+# count = st_autorefresh(interval=60000, limit=None, key="schedule_refresher")
 
 # --- HỆ THỐNG NHẮC NHỞ TỰ ĐỘNG ---
 # Kiểm tra thời gian lúc này và quét Vector DB mỗi lần chạy lại giao diện 
@@ -125,69 +129,69 @@ with st.sidebar:
     else:
         st.info("Chưa có lịch trình nào được lưu.", icon="📭")
 
-# Hiển thị lịch sử chat
+# --- HIỂN THỊ LỊCH SỬ CHAT (ĐÃ CẬP NHẬT ĐỂ GIỮ FILE) ---
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
+        # Hiển thị lại tên các file đã đính kèm trong lượt chat này
+        if "attached_files" in message:
+            for f_name in message["attached_files"]:
+                st.caption(f"📎 Đính kèm: {f_name}")
 
-# Ô nhập liệu (nằm ở nửa cuối file frontend.py)
-if user_input := st.chat_input("Hôm nay tôi có lịch gì không?", accept_file=True):
-    prompt = user_input.text if user_input.text else "Đã gửi tệp đính kèm."
+# Nhập liệu
+if user_input := st.chat_input("Hôm nay tui có lịch gì không?", accept_file=True):
+    st.session_state.is_processing = True 
+    prompt = user_input.text if user_input.text else "Xử lý file này giúp tui."
     
-    st.session_state.messages.append({"role": "user", "content": prompt})
+    # --- LƯU TIN NHẮN VÀO LỊCH SỬ KÈM TÊN FILE ---
+    file_names = [f.name for f in user_input.files] if user_input.files else []
+    st.session_state.messages.append({
+        "role": "user", 
+        "content": prompt,
+        "attached_files": file_names # Lưu danh sách tên file vào session state
+    })
+    
     with st.chat_message("user"):
         st.markdown(prompt)
-        if user_input.files:
-            for f in user_input.files:
-                st.caption(f"📎 Đính kèm: {f.name}")
+        for f_name in file_names:
+            st.caption(f"📎 Đính kèm: {f_name}")
 
-    with st.chat_message("assistant"):
-        current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        
-        # === XỬ LÝ ẢNH QUA OCR NẾU CÓ FILE ===
-        if user_input.files:
-            with st.spinner("Đang quét chữ trong ảnh (OCR)..."):
-                from tools import process_image_and_add_to_calendar
-                
-                # Đọc byte của file
-                image_bytes = user_input.files[0].read()
-                
-                # Gọi hàm OCR
-                image_response = process_image_and_add_to_calendar.invoke({
-                    "image_bytes": image_bytes, 
-                    "current_time": current_time_str
-                })
-                
-                st.markdown(image_response)
-                st.session_state.messages.append({"role": "assistant", "content": image_response})
-            st.rerun() 
-            
-        # === XỬ LÝ TEXT ===
-        else:
-            placeholder = st.empty()
-            full_response = ""
-            config = {"configurable": {"thread_id": st.session_state.thread_id}}
-            enhanced_prompt = f"{prompt}\n\n[Thông tin hệ thống ẩn: Thời gian thực tế ngay lúc này là {current_time_str}. BẮT BUỘC dùng mốc này làm chuẩn để tính toán event_time, tuyệt đối không tự bịa năm cũ.]"
-            
-            inputs = {"messages": [("human", enhanced_prompt)]}
-        # Chạy stream để bắt các bước suy nghĩ của Agent
-        with st.spinner("Đang xử lí..."):
-            try:
-                for chunk in main_agent.stream(inputs, config=config, stream_mode="updates"):
-                    for node, value in chunk.items():
-                        st.caption(f"⚙️ Node: {node} đang xử lý...")
-                        if "messages" in value:
-                            full_response = value["messages"][-1].content
-            except ValueError as e:
-                if "tool_calls" in str(e) and "ToolMessage" in str(e):
-                    # Lịch sử chat bị hỏng, reset thread_id
-                    st.session_state.thread_id = str(uuid.uuid4())
-                    st.session_state.messages = []
-                    st.warning("⚠️ Phiên chat trước bị lỗi, đã tự động tạo phiên mới. Vui lòng nhập lại yêu cầu.")
-                    st.rerun()
-                else:
-                    raise e
+    current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    enhanced_prompt = f"{prompt}\n\n[System: {current_time_str}]"
 
-        placeholder.markdown(full_response)
-        st.session_state.messages.append({"role": "assistant", "content": full_response})
-        st.rerun()
+    if user_input.files:
+        for f in user_input.files:
+            file_path = os.path.join(TEMP_DIR, f.name)
+            with open(file_path, "wb") as out_f:
+                out_f.write(f.read())
+            enhanced_prompt += f"\n\n[File Path: {file_path}]"
+
+    full_response = ""
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    
+    with st.status("🧠 Agent đang xử lý...", expanded=True) as status:
+        try:
+            for chunk in main_agent.stream({"messages": [("human", enhanced_prompt)]}, config=config, stream_mode="updates"):
+                for node, value in chunk.items():
+                    if "messages" in value:
+                        msg_content = value["messages"][-1].content
+                        if node == "tools":
+                            st.write(f"🛠️ Đang cập nhật cơ sở dữ liệu...")
+                        elif node == "agent":
+                            if msg_content.strip():
+                                if '{"name":' in msg_content and '"parameters":' in msg_content:
+                                    st.write("Đang đồng bộ dữ liệu ngầm...")
+                                else:
+                                    full_response = msg_content
+
+            status.update(label="Xử lý xong!", state="complete", expanded=False)
+        except Exception as e:
+            full_response = f"❌ Lỗi: {str(e)}"
+
+    if not full_response.strip():
+        full_response = "✅ Tui đã xử lý xong yêu cầu của bạn!"
+
+    st.markdown(full_response)
+    st.session_state.messages.append({"role": "assistant", "content": full_response})
+    st.session_state.is_processing = False
+    st.rerun()

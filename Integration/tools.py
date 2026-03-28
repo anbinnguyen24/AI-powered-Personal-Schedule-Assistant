@@ -1,412 +1,333 @@
 import os
 import re
+import json
+import tempfile
+import hashlib
 from datetime import datetime, timedelta
+
+import icalendar
 from dotenv import load_dotenv
 
-from langchain_core.tools import tool
-from langchain_chroma import Chroma
-from langchain_huggingface import HuggingFaceEndpoint, ChatHuggingFace
-import io
-import json
-import pytesseract
-from PIL import Image
-from langchain_core.messages import HumanMessage
+from llm_config import shared_llm
 
-# Thiết lập đường dẫn lưu Vector DB vào thư mục backend
+from langchain_core.tools import tool
+from langchain_core.messages import HumanMessage
+from langchain_chroma import Chroma
+from langchain_huggingface import HuggingFaceEndpointEmbeddings
+from langchain_unstructured import UnstructuredLoader
+
+# =========================================================
+# ENV + PATH
+# =========================================================
 BASE_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 BACKEND_DIR = os.path.join(BASE_DIR, "backend")
 os.makedirs(BACKEND_DIR, exist_ok=True)
-
-# Tải biến môi trường
 load_dotenv()
 
-# Khởi tạo mô hình Embedding qua Inference API
-embeddings = HuggingFaceEndpoint(
+UNSTRUCTURED_API_KEY = os.getenv('UNSTRUCTURED_API_KEY')
+
+# =========================================================
+# EMBEDDING (ONLINE)
+# =========================================================
+embeddings = HuggingFaceEndpointEmbeddings(
     model="sentence-transformers/all-MiniLM-L6-v2",
     huggingfacehub_api_token=os.getenv("HF_TOKEN"),
 )
 
-# Khởi tạo cơ sở dữ liệu Vector (ChromaDB) và chỉ định thư mục lưu trữ
 vector_db = Chroma(
     collection_name="schedule_events",
     embedding_function=embeddings,
-    persist_directory=BACKEND_DIR # Lưu dữ liệu offline trực tiếp vào folder backend
+    persist_directory=BACKEND_DIR,
 )
 
+# =========================================================
+# KHO CHỨA TẠM BẢN DỊCH & BẢN GỐC
+# =========================================================
+_RAW_TEXT_CACHE = {}
+_PARSED_JSON_CACHE = {} # <-- Kho chứa tạm kết quả JSON để Agent không phải ôm
+
+def _get_file_hash(file_bytes: bytes) -> str:
+    return hashlib.md5(file_bytes).hexdigest()
+
+def filter_relevant_lines(text: str) -> str:
+    lines = text.splitlines()
+    keep = []
+    for line in lines:
+        if any(ch.isdigit() for ch in line) or "Thứ" in line:
+            keep.append(line.strip())
+    return "\n".join(keep[:300])
+
+# =========================================================
+# BASIC TOOLS
+# =========================================================
 @tool
 def get_schedule_by_date(date: str):
-    """Lấy danh sách các sự kiện TRONG MỘT NGÀY CỤ THỂ.
-    - date: chuỗi ngày theo định dạng YYYY-MM-DD.
-    """
-    # Lấy chính xác các document có metadata "date" khớp với ngày được yêu cầu
+    """Lấy danh sách các sự kiện trong một ngày cụ thể (YYYY-MM-DD)."""
     results = vector_db.get(where={"date": date})
-    
-    if not results['documents']:
+    if not results["documents"]:
         return f"Bạn không có lịch trình nào vào ngày {date}."
-    
-    # In ra danh sách sự kiện
-    events_str = "\n".join([f"- {doc}" for doc in results['documents']])
-    return f"Lịch trình chính thức của bạn trong ngày {date}:\n{events_str}"
+    events_str = "\n".join(f"- {doc}" for doc in results["documents"])
+    return f"Lịch trình ngày {date}:\n{events_str}"
 
 @tool
 def search_events(query: str, k: int = 3):
-    """Tìm kiếm sự kiện theo thông tin (tên, địa điểm) hoặc dự đoán các sự kiện có khả năng xảy ra.
-    - query: Chuỗi tìm kiếm (Ví dụ: 'họp với khách hàng', 'các sự kiện ở quận 1').
-    """
-    # Tìm top k sự kiện có ý nghĩa tương đồng nhất với câu hỏi
+    """Tìm kiếm các sự kiện đã lưu bằng truy vấn ngữ nghĩa."""
     results = vector_db.similarity_search(query, k=k)
-    
     if not results:
-        return f"Không tìm thấy sự kiện nào liên quan hoặc có khả năng xảy ra với thông tin: '{query}'."
-    
-    events_str = "\n".join([f"- {doc.page_content}" for doc in results])
-    return f"Dựa trên dữ liệu, đây là các sự kiện liên quan hoặc có khả năng xảy ra cao nhất:\n{events_str}"
+        return f"Không tìm thấy sự kiện nào liên quan tới '{query}'."
+    events_str = "\n".join(f"- {doc.page_content}" for doc in results)
+    return f"Các sự kiện liên quan:\n{events_str}"
 
 @tool
 def get_events_by_date_range(start_date: str, end_date: str):
-    """Lấy danh sách sự kiện trong một KHOẢNG THỜI GIAN.
-    - start_date: Ngày bắt đầu (YYYY-MM-DD).
-    - end_date: Ngày kết thúc (YYYY-MM-DD).
-    Ví dụ: Tìm sự kiện từ 2026-03-18 đến 2026-03-25.
-    """
-    results = vector_db.get(
-        where={
-            "$and": [
-                {"date": {"$gte": start_date}},
-                {"date": {"$lte": end_date}}
-            ]
-        }
-    )
-    
-    if not results['documents']:
+    """Lấy danh sách sự kiện trong một khoảng ngày."""
+    results = vector_db.get(where={"$and": [{"date": {"$gte": start_date}}, {"date": {"$lte": end_date}}]})
+    if not results["documents"]:
         return f"Không có sự kiện nào từ {start_date} đến {end_date}."
-    
-    events_str = "\n".join([f"- {doc}" for doc in results['documents']])
+    events_str = "\n".join(f"- {doc}" for doc in results["documents"])
     return f"Các sự kiện từ {start_date} đến {end_date}:\n{events_str}"
 
 @tool
-def add_event_to_calendar(event_name: str, start_time: str, end_time: str, location: str = "", reminder_minutes: int = 0, current_time: str = ""):
-    """Thêm một sự kiện mới vào lịch. (event_name, start_time, end_time là BẮT BUỘC)
-    - event_name: tên hoặc nội dung sự kiện.
-    - start_time: thời gian bắt đầu (YYYY-MM-DD HH:MM).
-    - end_time: thời gian kết thúc (YYYY-MM-DD HH:MM).
-    - location: địa điểm diễn ra sự kiện, có thể để trống.
-    - reminder_minutes: số phút nhắc trước sự kiện (ví dụ: 30), mặc định là 0.
-    - current_time: thời gian hiện tại để kiểm tra (nếu để trống sẽ lấy giờ hệ thống).
-    """
-    if not current_time:
-        current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    # Kiểm tra thời gian quá khứ
-    is_valid_time, time_error = validate_event_time(start_time, current_time)
-    if not is_valid_time:
-        return f"❌ {time_error}"
-    
-    # Kiểm tra trùng lặp
-    is_duplicate = check_duplicate_event(start_time, event_name)
-    if is_duplicate:
-        return f"⚠️ Sự kiện **{event_name}** lúc **{start_time}** đã có trong lịch. Không thêm sự kiện trùng."
-    
-    date_str = start_time[:10] 
-    
-    metadata = {
-        "status": "scheduled",
-        "date": date_str,
-        "event_name": event_name,
-        "start_time": start_time,
-        "end_time": end_time,
-        "location": location,
-        "reminder_minutes": reminder_minutes
-    }
-
-    try:
-        clean_start_time = start_time[:16] 
-        dt = datetime.strptime(clean_start_time, "%Y-%m-%d %H:%M")
-        reminder_dt = dt - timedelta(minutes=reminder_minutes)
-        metadata["reminder_timestamp"] = int(reminder_dt.timestamp())
-    except ValueError:
-        pass 
-
-    # Xây dựng câu văn miêu tả sự kiện dựa trên thông tin có sẵn
-    text_content = f"Sự kiện: {event_name}. Bắt đầu lúc: {start_time}. Kết thúc lúc: {end_time}."
-    if location:
-        text_content += f" Địa điểm: {location}."
-
-    vector_db.add_texts(
-        texts=[text_content], 
-        metadatas=[metadata]
-    )
-    
-    msg = f"Đã ghi nhận sự kiện '{event_name}' bắt đầu lúc {start_time}. Kết thúc lúc: {end_time}."
-    if location:
-        msg += f" Địa điểm: {location}."
-    
-    if reminder_minutes > 0:
-        msg += f" Thông báo nhắc trước {reminder_minutes} phút."
-        
-    return msg
-
-@tool
 def find_available_time_slots(date: str, schedule_context: str, start_time: str = "08:00", end_time: str = "18:00"):
-    """Phân tích các khoảng trống thời gian làm việc trong một ngày (date) dựa trên lịch trình (schedule_context) từ start_time đến end_time (định dạng HH:MM)."""
-    
-    def parse_time(time_str):
-        h, m = map(int, time_str.split(':'))
+    """Phân tích các khung giờ trống trong một ngày dựa trên lịch đã có."""
+    def parse_time(t):
+        h, m = map(int, t.split(":"))
         return h * 60 + m
-        
+
     try:
         work_start = parse_time(start_time)
         work_end = parse_time(end_time)
     except ValueError:
-        return "Lỗi định dạng giờ! Vui lòng sử dụng định dạng HH:MM (vd: 07:30)."
+        return "❌ Lỗi định dạng giờ. Vui lòng dùng HH:MM."
 
-    # Extract event pairs: "Bắt đầu lúc: YYYY-MM-DD HH:MM ... Kết thúc lúc: YYYY-MM-DD HH:MM"
-    event_pattern = r'Bắt đầu lúc:\s+\d{4}-\d{2}-\d{2}\s+(\d{1,2}):(\d{2}).*?Kết thúc lúc:\s+\d{4}-\d{2}-\d{2}\s+(\d{1,2}):(\d{2})'
-    event_matches = re.findall(event_pattern, schedule_context, re.DOTALL)
+    pattern = r"Bắt đầu:\s+\d{4}-\d{2}-\d{2}\s+(\d{2}):(\d{2}).*?Kết thúc:\s+\d{4}-\d{2}-\d{2}\s+(\d{2}):(\d{2})"
+    matches = re.findall(pattern, schedule_context, re.DOTALL)
+    if not matches:
+        return f"Bạn trống cả ngày {date} từ {start_time} đến {end_time}."
+
+    busy = [(int(sh) * 60 + int(sm), int(eh) * 60 + int(em)) for sh, sm, eh, em in matches]
+    busy.sort()
     
-    if not event_matches:
-        return f"Không có lịch trình nào chiếm chỗ, bạn trống cả ngày {date} từ {start_time} đến {end_time}."
-    
-    busy_slots = []
-    for start_h, start_m, end_h, end_m in event_matches:
-        start_mins = int(start_h) * 60 + int(start_m)
-        end_mins = int(end_h) * 60 + int(end_m)
-        busy_slots.append((start_mins, end_mins))
-    
-    busy_slots.sort(key=lambda x: x[0])
-    
-    merged_busy = []
-    for slot in busy_slots:
-        if not merged_busy:
-            merged_busy.append(slot)
+    merged = []
+    for s, e in busy:
+        if not merged or s > merged[-1][1]:
+            merged.append([s, e])
         else:
-            last = merged_busy[-1]
-            if slot[0] <= last[1]:
-                merged_busy[-1] = (last[0], max(last[1], slot[1]))
-            else:
-                merged_busy.append(slot)
-                
-    free_slots = []
-    current_time = work_start
-    
-    for start, end in merged_busy:
-        if current_time < start:
-            free_slots.append((current_time, start))
-        current_time = max(current_time, end)
-        
-    if current_time < work_end:
-        free_slots.append((current_time, work_end))
-        
-    def format_time(mins):
-        h = mins // 60
-        m = mins % 60
-        return f"{h:02d}:{m:02d}"
-        
-    if not free_slots:
-        return f"Lịch ngày {date} của bạn đã kín mít từ {start_time} đến {end_time}, không còn khung giờ trống."
-        
-    result = f"Các khung giờ trống của bạn trong ngày {date} từ {start_time} đến {end_time} là:\n"
-    for s, e in free_slots:
-        result += f"- Từ {format_time(s)} đến {format_time(e)}\n"
-        
-    return result
+            merged[-1][1] = max(merged[-1][1], e)
 
-# Khởi tạo một LLM parser dùng chính Qwen bạn đang có để tiết kiệm
-parse_endpoint = HuggingFaceEndpoint(
-    repo_id="Qwen/Qwen2.5-72B-Instruct",
-    huggingfacehub_api_token=os.getenv("HF_TOKEN"),
-    temperature=0.1
-)
-parsing_llm = ChatHuggingFace(llm=parse_endpoint)
+    free = []
+    cur = work_start
+    for s, e in merged:
+        if cur < s: free.append((cur, s))
+        cur = max(cur, e)
+    if cur < work_end: free.append((cur, work_end))
+
+    def fmt(m): return f"{m//60:02d}:{m%60:02d}"
+
+    if not free: return f"Lịch ngày {date} đã kín."
+    msg = f"Các khung giờ trống ngày {date}:\n"
+    for s, e in free: msg += f"- {fmt(s)} → {fmt(e)}\n"
+    return msg
+
+def validate_event_logic(start_time, end_time, event_name, current_time):
+    try:
+        st = datetime.strptime(start_time[:16], "%Y-%m-%d %H:%M")
+        et = datetime.strptime(end_time[:16], "%Y-%m-%d %H:%M")
+        ct = datetime.strptime(current_time[:16], "%Y-%m-%d %H:%M")
+        if et <= st: return "❌ Thời gian kết thúc phải sau thời gian bắt đầu."
+        if st < ct: return "⚠️ Sự kiện này nằm trong quá khứ."
+    except Exception:
+        return "❌ Định dạng thời gian không hợp lệ."
+    return "VALID"
 
 @tool
-def check_duplicate_event(start_time: str, event_name: str) -> bool:
-    """Kiểm tra xem sự kiện đã tồn tại trong Vector DB chưa."""
+def add_event_to_calendar(event_name: str, start_time: str, end_time: str, location: str = "", reminder_minutes: int = 0, current_time: str = ""):
+    """Thêm một sự kiện vào lịch sau khi kiểm tra hợp lệ."""
+    if not current_time: current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    check = validate_event_logic(start_time, end_time, event_name, current_time)
+    if check != "VALID": return check
+
     date_str = start_time[:10]
-    results = vector_db.get(where={"date": date_str})
-    
-    if not results or not results.get('metadatas'):
-        return False
-        
-    for meta in results['metadatas']:
-        # Trùng thời gian bắt đầu
-        if meta.get("start_time") == start_time:
-            return True
-        # Trùng tên sự kiện trong cùng 1 ngày
-        if meta.get("event_name", "").strip().lower() == event_name.strip().lower():
-            return True
-            
-    return False
-
-
-def extract_text_via_ocr(image_bytes: bytes) -> str:
-    """Sử dụng Tesseract OCR để đọc chữ từ ảnh"""
-    image = Image.open(io.BytesIO(image_bytes))
-    
-    # Thêm config '--psm 6' hoặc '--psm 4' để ép Tesseract cố gắng đọc cấu trúc dạng khối/cột
-    raw_text = pytesseract.image_to_string(image, lang='vie+eng', config='--psm 6')
-    
-    # === THÊM ĐOẠN NÀY ĐỂ DEBUG TRÊN TERMINAL ===
-    print("\n" + "="*20 + " KẾT QUẢ QUÉT OCR " + "="*20)
-    print(raw_text)
-    print("="*59 + "\n")
-    # ============================================
-    
-    return raw_text
-
-def validate_event_time(start_time: str, current_time: str) -> tuple[bool, str]:
-    """Kiểm tra xem thời gian sự kiện có phải là quá khứ không.
-    Returns: (is_valid, error_message)
-    - is_valid: True nếu thời gian hợp lệ, False nếu là quá khứ
-    - error_message: Thông báo lịch sự cho người dùng
-    """
     try:
-        event_dt = datetime.strptime(start_time[:16], "%Y-%m-%d %H:%M")
-        current_dt = datetime.strptime(current_time[:16], "%Y-%m-%d %H:%M")
-        
-        if event_dt < current_dt:
-            formatted_event = event_dt.strftime("%d/%m/%Y lúc %H:%M")
-            formatted_now = current_dt.strftime("%d/%m/%Y lúc %H:%M")
-            error_msg = f"⏰ **Lưu ý:** Thời gian sự kiện ({formatted_event}) đã trôi qua so với thời gian hiện tại ({formatted_now}).\n\nVui lòng kiểm tra lại thời gian hoặc ngày tháng năm cho sự kiện nhé."
-            return False, error_msg
-        
-        return True, ""
-    except ValueError:
-        return False, "❌ Lỗi: Định dạng thời gian không hợp lệ."
+        st_obj = datetime.strptime(start_time[:16], "%Y-%m-%d %H:%M")
+        rem_obj = st_obj - timedelta(minutes=int(reminder_minutes))
+        rem_ts = int(rem_obj.timestamp())
+    except Exception:
+        rem_ts = 0
 
-def parse_event_with_qwen(raw_text: str, current_time: str) -> list:
-    """Đưa văn bản thô từ OCR cho Qwen xử lý thành DANH SÁCH JSON"""
+    meta = {
+        "date": date_str, "event_name": event_name, "start_time": start_time,
+        "end_time": end_time, "location": location, "reminder_minutes": int(reminder_minutes),
+        "reminder_timestamp": rem_ts, 
+    }
+
+    text = f"{event_name}. Bắt đầu: {start_time}. Kết thúc: {end_time}."
+    vector_db.add_texts([text], metadatas=[meta])
+    return f"✅ Đã lưu sự kiện '{event_name}'."
+
+def is_ics_file(file_bytes: bytes) -> bool:
+    try: return "BEGIN:VCALENDAR" in file_bytes[:200].decode("utf-8", "ignore").upper()
+    except Exception: return False
+
+def extract_text_with_unstructured(file_bytes: bytes, file_name: str) -> str:
+    if not UNSTRUCTURED_API_KEY:
+        return "❌ Thiếu UNSTRUCTURED_API_KEY."
+
+    file_hash = _get_file_hash(file_bytes)
+    if file_hash in _RAW_TEXT_CACHE: return _RAW_TEXT_CACHE[file_hash]
+
+    _, ext = os.path.splitext(file_name)
+    with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as f:
+        f.write(file_bytes)
+        path = f.name
+
+    try:
+        loader = UnstructuredLoader(file_path=path, api_key=UNSTRUCTURED_API_KEY, partition_via_api=True, chunking_strategy="by_title", strategy="hi_res", pdf_infer_table_structure=True)
+        docs = loader.load()
+        extracted_parts = [d.metadata["text_as_html"] if "text_as_html" in d.metadata else d.page_content for d in docs]
+        text = "\n\n".join(extracted_parts)
+        _RAW_TEXT_CACHE[file_hash] = text
+        return text
+    finally:
+        try: os.remove(path)
+        except Exception: pass
+
+def parse_event_with_nvidia(raw_text: str, current_time: str, user_prompt: str = ""):
     prompt = f"""
-    Bạn là một hệ thống chuyển đổi văn bản OCR thành mảng JSON. BẠN KHÔNG CÓ KHẢ NĂNG GIAO TIẾP.
-    Thời gian hiện tại là {current_time}.
-    Dưới đây là văn bản OCR từ một thời khóa biểu chứa RẤT NHIỀU môn học:
+    Bạn là một AI siêu việt trong việc bóc tách dữ liệu lịch trình từ văn bản.
+    Nhiệm vụ: Trả về MỘT MẢNG JSON 2 CHIỀU chứa toàn bộ sự kiện. KHÔNG giải thích thêm.
+    Cấu trúc: ["YYYY-MM-DD", "Tên sự kiện", "HH:MM (bắt đầu)", "HH:MM (kết thúc)"]
+    Thời gian hiện tại: {current_time}
+    Yêu cầu bổ sung: {user_prompt}
+    
+    VĂN BẢN THÔ CẦN XỬ LÝ:
     ---
     {raw_text}
     ---
-    NHIỆM VỤ BẮT BUỘC:
-    1. Tìm và trích xuất TẤT CẢ các môn học/sự kiện có trong văn bản.
-    2. TUYỆT ĐỐI KHÔNG ĐƯỢC LƯỜI BIẾNG BỎ SÓT. Nếu trong văn bản có 5 môn, bạn PHẢI trả về 5 object. Có 10 môn PHẢI trả về 10 object.
-    3. Trả về ĐÚNG 1 MẢNG JSON (LIST) CHỨA CÁC OBJECT ĐÓ.
-
-    CẤU TRÚC BẮT BUỘC CỦA MỖI OBJECT TRONG MẢNG:
-    [
-        {{
-            "event_name": "Tên môn học",
-            "start_time": "YYYY-MM-DD HH:MM",
-            "end_time": "YYYY-MM-DD HH:MM",
-            "location": "Phòng học"
-        }},
-        ... (Tiếp tục cho đến khi HẾT CÁC MÔN) ...
-    ]
-    
-    QUY TẮC:
-    - Tính toán ngày tháng năm YYYY-MM-DD dựa vào "{current_time}".
-    - Nếu thiếu giờ bắt đầu, mặc định "07:00".
-    - Nếu thiếu giờ kết thúc, cộng thêm 3 tiếng từ giờ bắt đầu.
     """
+    raw_result = shared_llm.invoke([HumanMessage(content=prompt)]).content.strip()
+    try:
+        m = re.search(r"\[.*\]", raw_result, flags=re.DOTALL)
+        if m: return json.dumps(json.loads(m.group(0)), ensure_ascii=False)
+        return "[]" 
+    except Exception as e:
+        return f"❌ Lỗi xử lý JSON: {str(e)}"
+
+# =========================================================
+# CHỈ DÙNG MÃ FILE (FILE_HASH) ĐỂ TRUY XUẤT VÀ LƯU (CÓ TỐI ƯU HÀNG LOẠT)
+# =========================================================
+# =========================================================
+# CHỈ DÙNG MÃ FILE (FILE_HASH) ĐỂ TRUY XUẤT VÀ LƯU (CÓ TỐI ƯU HÀNG LOẠT & LOG CONSOLE)
+# =========================================================
+@tool
+def save_events_from_schedule_text(file_hash: str, current_time: str = ""):
+    """Lưu tự động các sự kiện vào CSDL dựa trên mã file_hash. Lỗi sẽ được log ra console."""
+    if not current_time: current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+
+    schedule_text = _PARSED_JSON_CACHE.get(file_hash)
     
-    response = parsing_llm.invoke([HumanMessage(content=prompt)])
-    content = response.content.strip()
-    
-    content = content.replace("```json", "").replace("```", "").strip()
-    
-    start_idx = content.find('[')
-    end_idx = content.rfind(']')
-    
-    if start_idx != -1 and end_idx != -1 and end_idx > start_idx:
-        json_str = content[start_idx:end_idx+1]
+    if not schedule_text:
+        print(f"\n[CONSOLE LOG - ERROR] file_hash '{file_hash}' không tồn tại hoặc đã hết hạn.")
+        return "❌ Dữ liệu phiên làm việc đã hết hạn. Hãy yêu cầu đọc lại file."
+
+    try:
+        events = json.loads(schedule_text)
+    except Exception as e:
+        print(f"\n[CONSOLE LOG - ERROR] Lỗi parse JSON dữ liệu trong kho: {str(e)}")
+        return "❌ Đã xảy ra sự cố kỹ thuật khi đọc dữ liệu. Vui lòng thử lại."
+
+    if not events or not isinstance(events, list):
+        return "⚠️ Tui không thấy lịch trình nào hợp lệ để lưu."
+
+    saved = []
+    errors = []
+    batch_texts = []
+    batch_metas = []
+
+    for idx, ev in enumerate(events, 1):
+        if not isinstance(ev, list) or len(ev) < 4: continue
+        
+        date_val = str(ev[0]).strip()
+        name = str(ev[1]).strip()
+        st_time = str(ev[2]).strip()
+        et_time = str(ev[3]).strip()
+        st = f"{date_val} {st_time}"
+        et = f"{date_val} {et_time}"
+        loc = str(ev[4]).strip() if len(ev) > 4 and ev[4] else ""
+        
         try:
-            parsed_json = json.loads(json_str)
-            if isinstance(parsed_json, dict): 
-                return [parsed_json]
-            return parsed_json
-        except json.JSONDecodeError as e:
-            raise json.JSONDecodeError(f"LLM trả về định dạng sai. Nội dung: {content}", content, 0)
-    else:
-        start_idx_dict = content.find('{')
-        if start_idx_dict != -1:
-            json_str = content[start_idx_dict:]
-            try:
-                decoder = json.JSONDecoder()
-                parsed_json, _ = decoder.raw_decode(json_str)
-                return [parsed_json]
-            except:
-                pass
-        raise ValueError(f"Không tìm thấy mảng JSON nào. LLM nói: {content}")
+            rem = int(ev[5]) if len(ev) > 5 and ev[5] else 0
+        except:
+            rem = 0
+
+        # Kiểm tra tính hợp lệ
+        check = validate_event_logic(st, et, name, current_time)
+        if check != "VALID":
+            errors.append((name, check))  # Gom lỗi lại để in ra console sau
+            continue
+
+        try:
+            st_obj = datetime.strptime(st[:16], "%Y-%m-%d %H:%M")
+            rem_obj = st_obj - timedelta(minutes=int(rem))
+            rem_ts = int(rem_obj.timestamp())
+        except Exception:
+            rem_ts = 0
+
+        meta = {
+            "date": date_val, "event_name": name, "start_time": st,
+            "end_time": et, "location": loc, "reminder_minutes": int(rem),
+            "reminder_timestamp": rem_ts, 
+        }
+        text = f"{name}. Bắt đầu: {st}. Kết thúc: {et}."
+        
+        batch_texts.append(text)
+        batch_metas.append(meta)
+        saved.append(name)
+
+    # LƯU HÀNG LOẠT
+    if batch_texts:
+        try:
+            vector_db.add_texts(batch_texts, metadatas=batch_metas)
+        except Exception as e:
+            print(f"\n[CONSOLE LOG - DB ERROR] Lỗi ghi CSDL hàng loạt: {str(e)}")
+            return "❌ Hệ thống cơ sở dữ liệu đang gặp sự cố. Không thể lưu."
+
+    # --- IN LỖI RA CONSOLE (TERMINAL) THAY VÌ HIỂN THỊ LÊN WEB ---
+    if errors:
+        print("\n" + "="*50)
+        print(f"⚠️ [SYSTEM LOG] BỎ QUA {len(errors)} SỰ KIỆN DO LỖI DỮ LIỆU:")
+        for err_name, err_msg in errors:
+            print(f"  - Sự kiện: '{err_name}' | Nguyên nhân: {err_msg}")
+        print("="*50 + "\n")
+
+    # TRẢ KẾT QUẢ GỌN GÀNG CHO WEB
+    if not saved:
+        return "⚠️ Không có sự kiện nào được lưu thành công."
+        
+    return f"✅ Tui đã lưu thành công {len(saved)} sự kiện vào hệ thống!"
 
 @tool
-def process_image_and_add_to_calendar(image_bytes: bytes, current_time: str) -> str:
-    """Quy trình tổng hợp: Đọc OCR -> Gửi Qwen -> Xử lý mảng sự kiện -> Lưu DB hàng loạt"""
-    try:
-        # Bước 1: Quét chữ bằng Tesseract
-        raw_text = extract_text_via_ocr(image_bytes)
+def process_schedule_file(file_path: str, current_time: str, user_prompt: str = ""):
+    """Xử lý file lịch đính kèm. Khai thác dữ liệu, lưu vào kho tạm và trả về mã file_hash."""
+    if not os.path.exists(file_path): return f"❌ Không tìm thấy file tại: {file_path}"
         
-        if len(raw_text.strip()) < 5:
-            return "❌ Hình ảnh quá mờ hoặc không chứa văn bản nào có thể đọc được."
+    with open(file_path, "rb") as f: file_bytes = f.read()
+    file_name = os.path.basename(file_path)
+    
+    raw_text = extract_text_with_unstructured(file_bytes, file_name)
+    if not raw_text or len(raw_text.strip()) < 20: return "❌ Tui không đọc được nội dung có ý nghĩa từ file này."
 
-        # Bước 2: Phân tích thành MẢNG JSON
-        events_list = parse_event_with_qwen(raw_text, current_time)
-        
-        if not events_list:
-            return "❌ Không tìm thấy sự kiện/môn học nào trong hình ảnh."
-        
-        success_msgs = []
-        error_msgs = []
-        
-        # Bước 3: Duyệt qua từng môn học để kiểm tra và lưu
-        for event_data in events_list:
-            event_name = event_data.get("event_name")
-            start_time = event_data.get("start_time")
-            end_time = event_data.get("end_time")
-            location = event_data.get("location", "")
-            
-            if not event_name or not start_time or not end_time:
-                error_msgs.append(f"⚠️ Thiếu thông tin cho sự kiện: {event_name or 'Không rõ tên'}")
-                continue
-            
-            # Kiểm tra thời gian quá khứ
-            is_valid_time, time_error = validate_event_time(start_time, current_time)
-            if not is_valid_time:
-                # Làm sạch câu lỗi cho gọn
-                clean_error = time_error.replace('❌ Lỗi: ', '').replace('⏰ **Lưu ý:** ', '')
-                error_msgs.append(f"⚠️ {event_name}: {clean_error}")
-                continue
-                
-            # Kiểm tra trùng lặp (Nhớ dùng .invoke() vì đây là tool)
-            is_duplicate = check_duplicate_event.invoke({
-                "start_time": start_time, 
-                "event_name": event_name
-            })
-            
-            if is_duplicate:
-                error_msgs.append(f"⚠️ **{event_name}** lúc {start_time[-5:]} đã có trong lịch. Bỏ qua.")
-                continue
-                
-            # Lưu vào DB (Nhớ dùng .invoke())
-            add_event_to_calendar.invoke({
-                "event_name": event_name,
-                "start_time": start_time,
-                "end_time": end_time,
-                "location": location,
-                "reminder_minutes": 0,
-                "current_time": current_time
-            })
-            # Ghi nhận thành công
-            success_msgs.append(f"- *{event_name}* ({start_time})")
-        
-        # Bước 4: Tổng hợp kết quả trả về cho giao diện
-        final_output = []
-        if success_msgs:
-            final_output.append(f"✅ **Đã lưu thành công {len(success_msgs)} sự kiện:**\n" + "\n".join(success_msgs))
-        if error_msgs:
-            final_output.append(f"❌ **Các sự kiện bị bỏ qua:**\n" + "\n".join(error_msgs))
-            
-        if not final_output:
-            return "❌ Không có sự kiện nào được xử lý."
-            
-        return "\n\n".join(final_output)
-        
-    except json.JSONDecodeError as e:
-        return f"❌ Lỗi: Mô hình không thể định dạng JSON.\n\nChi tiết: {str(e)}"
-    except Exception as e:
-        return f"❌ Có lỗi xảy ra trong quá trình xử lý ảnh OCR: {str(e)}"
+    parsed_text = parse_event_with_nvidia(raw_text, current_time, user_prompt)
+    
+    # KHI PHÂN TÍCH XONG, LƯU VÀO KHO TẠM
+    file_hash = _get_file_hash(file_bytes)
+    _PARSED_JSON_CACHE[file_hash] = parsed_text
+    
+    try:
+        count = len(json.loads(parsed_text))
+    except:
+        count = 0
+    
+    # CHỈ TRẢ VỀ CHO AGENT MỘT THÔNG BÁO VÀ MÃ HASH NGẮN GỌN
+    return f"Đã trích xuất thành công {count} sự kiện. [file_hash: {file_hash}]"
