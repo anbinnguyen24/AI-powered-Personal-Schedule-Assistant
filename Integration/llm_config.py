@@ -8,5 +8,5 @@ load_dotenv()
 shared_llm = ChatNVIDIA(
     model="openai/gpt-oss-20b", 
     temperature=0,
-    max_completion_tokens=4096
+    max_completion_tokens=4192
 )

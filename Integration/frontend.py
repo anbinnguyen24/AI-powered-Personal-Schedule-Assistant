@@ -22,11 +22,17 @@ st.set_page_config(page_title="AI Schedule Agent", layout="wide")
 # SESSION STATE INIT
 # =====================================
 
+
+if "all_data" not in st.session_state:
+    db = get_vector_db()
+    st.session_state.all_data = db.get(include=["documents", "metadatas"])
+
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
 if "thread_id" not in st.session_state:
     st.session_state.thread_id = str(uuid.uuid4())
+
 
 # ✅ FLAG CHỐNG RERUN GỌI TOOL LẶP
 if "agent_ran" not in st.session_state:
@@ -36,14 +42,12 @@ if "agent_ran" not in st.session_state:
 # =====================================
 # REMINDER CHECK
 # =====================================
-st_autorefresh(interval=15000, key="schedule_refresh")
+if st.session_state.agent_ran:
+    st_autorefresh(interval=60000, key="schedule_refresh")
 current_ts = int(time.time())
-all_data = None
 
-if "initialized" not in st.session_state:
-    st.session_state.initialized = True
-else:
-    all_data = get_vector_db().get()
+# Lấy dữ liệu từ bộ nhớ đệm (RAM) ra để dùng cho toàn bộ file
+all_data = st.session_state.all_data
 
 if all_data and all_data.get("metadatas"):
     for i, meta in enumerate(all_data["metadatas"]):
@@ -166,9 +170,14 @@ for message in st.session_state.messages:
 # =====================================
 
 if user_input := st.chat_input("Hôm nay tui có lịch gì không?", accept_file=True):
+    full_response = ""
+    config = {"configurable": {"thread_id": st.session_state.thread_id}}
+    # 1. Lấy text và files cực an toàn, Pylance không bao giờ bắt lỗi được
     prompt = user_input.text if user_input.text else "Xử lý file này giúp tui."
-
-    file_names = [f.name for f in user_input.files] if user_input.files else []
+    
+    # Dùng "or []" để đảm bảo uploaded_files luôn là List, dập tắt lỗi báo None
+    uploaded_files = user_input.files or [] 
+    file_names = [f.name for f in uploaded_files]
 
     st.session_state.messages.append({
         "role": "user",
@@ -176,7 +185,6 @@ if user_input := st.chat_input("Hôm nay tui có lịch gì không?", accept_fil
         "attached_files": file_names
     })
 
-    # ✅ RESET FLAG MỖI KHI CÓ INPUT MỚI
     st.session_state.agent_ran = False
 
     with st.chat_message("user"):
@@ -187,47 +195,53 @@ if user_input := st.chat_input("Hôm nay tui có lịch gì không?", accept_fil
     current_time_str = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     enhanced_prompt = f"{prompt}\n\n[System: {current_time_str}]"
 
-    if user_input.files:
-        for f in user_input.files:
-            file_path = os.path.join(TEMP_DIR, f.name)
-            with open(file_path, "wb") as out_f:
-                out_f.write(f.read())
-
-            enhanced_prompt += f"\n\n[File Path: {file_path}]"
-
-    full_response = ""
-    config = {"configurable": {"thread_id": st.session_state.thread_id}}
-
     if not st.session_state.agent_ran:
-        with st.spinner("🧠 Agent đang xử lý..."):
-            try:
-                agent = get_main_agent()
-                for chunk in agent.stream(
-                    {"messages": [("human", enhanced_prompt)]},
-                    config=config,
-                    stream_mode="updates"
-                ):
-                    for node, value in chunk.items():
-                        if "messages" in value:
-                            msg = value["messages"][-1].content
-                            if node == "agent":
-                                full_response = msg
-            except Exception as e:
-                full_response = f"❌ Lỗi: {str(e)}"
+        with st.chat_message("assistant"):
+            
+            # 2. BẬT SPINNER NGAY TẠI ĐÂY (Vừa Enter là loading hiện ra liền)
+            with st.spinner("🧠 Agent đang suy nghĩ và thực thi công cụ..."):
+                
+                # 3. Luồng ghi file vào ổ cứng nằm trọn bên trong Spinner
+                for f in uploaded_files:
+                    file_path = os.path.join(TEMP_DIR, f.name)
+                    with open(file_path, "wb") as out_f:
+                        out_f.write(f.read())
+                    enhanced_prompt += f"\n\n[File Path: {file_path}]"
 
+                # 4. Bắt đầu gọi Agent
+                try:
+                    agent = get_main_agent()
+                    # Vòng lặp này sẽ chặn (block) code cho đến khi Agent chạy xong toàn bộ (bao gồm cả các tool lưu file/sự kiện)
+                    for chunk in agent.stream(
+                        {"messages": [("human", enhanced_prompt)]},
+                        config=config,
+                        stream_mode="updates"
+                    ):
+                        for node, value in chunk.items():
+                            if "messages" in value:
+                                msg = value["messages"][-1].content
+                                # Đảm bảo msg là text và không bị rỗng thì mới cập nhật
+                                if node == "agent" and isinstance(msg, str) and msg.strip():
+                                    full_response = msg
+                except Exception as e:
+                    full_response = f"❌ Lỗi: {str(e)}"
+            
+            # --- VỪA THOÁT KHỎI SPINNER LÀ LOADING TẮT ---
+
+            if not full_response.strip():
+                full_response = "✅ Tui đã xử lý xong yêu cầu của bạn!"
+            
+            # 3. IN KẾT QUẢ RA NGAY TỨC THÌ (Không có độ trễ)
+            st.markdown(full_response)
+
+        # 4. Lưu tin nhắn vào lịch sử
+        st.session_state.messages.append({
+            "role": "assistant",
+            "content": full_response
+        })
+
+        # 5. Khóa trạng thái để không bị gọi lại
         st.session_state.agent_ran = True
 
-    if not full_response.strip():
-        full_response = "✅ Tui đã xử lý xong yêu cầu của bạn!"
-
-    with st.chat_message("assistant"):
-        st.markdown(full_response)
-
-    st.session_state.messages.append({
-        "role": "assistant",
-        "content": full_response
-    })
-
-    st.session_state.agent_ran = True
-
-    st.rerun()
+        st.session_state.all_data = get_vector_db().get(include=["documents", "metadatas"])
+        st.rerun()

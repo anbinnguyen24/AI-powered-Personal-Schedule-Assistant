@@ -2,4 +2,4 @@ __pycache__/
 *.pyc
 .env
 .vscode/launch.json
-backend/chroma.sqlite3
+backend/
