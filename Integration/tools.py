@@ -16,6 +16,26 @@ from langchain_chroma import Chroma
 from langchain_huggingface import HuggingFaceEndpointEmbeddings
 from langchain_unstructured import UnstructuredLoader
 
+# === THÊM Ở ĐẦU FILE ===
+_vector_db = None
+_embeddings = None
+
+
+def get_vector_db():
+    global _vector_db, _embeddings
+    if _vector_db is None:
+        _embeddings = HuggingFaceEndpointEmbeddings(
+            model="sentence-transformers/all-MiniLM-L6-v2",
+            huggingfacehub_api_token=os.getenv("HF_TOKEN"),
+        )
+        _vector_db = Chroma(
+            collection_name="schedule_events",
+            embedding_function=_embeddings,
+            persist_directory=BACKEND_DIR,
+        )
+    return _vector_db
+
+
 # =========================================================
 # ENV + PATH
 # =========================================================
@@ -63,7 +83,7 @@ def filter_relevant_lines(text: str) -> str:
 @tool
 def get_schedule_by_date(date: str):
     """Lấy danh sách các sự kiện trong một ngày cụ thể (YYYY-MM-DD)."""
-    results = vector_db.get(where={"date": date})
+    results = get_vector_db().get(where={"date": date})
     if not results["documents"]:
         return f"Bạn không có lịch trình nào vào ngày {date}."
     events_str = "\n".join(f"- {doc}" for doc in results["documents"])
@@ -72,7 +92,7 @@ def get_schedule_by_date(date: str):
 @tool
 def search_events(query: str, k: int = 3):
     """Tìm kiếm các sự kiện đã lưu bằng truy vấn ngữ nghĩa."""
-    results = vector_db.similarity_search(query, k=k)
+    results = get_vector_db().similarity_search(query, k=k)
     if not results:
         return f"Không tìm thấy sự kiện nào liên quan tới '{query}'."
     events_str = "\n".join(f"- {doc.page_content}" for doc in results)
@@ -81,7 +101,7 @@ def search_events(query: str, k: int = 3):
 @tool
 def get_events_by_date_range(start_date: str, end_date: str):
     """Lấy danh sách sự kiện trong một khoảng ngày."""
-    results = vector_db.get(where={"$and": [{"date": {"$gte": start_date}}, {"date": {"$lte": end_date}}]})
+    results = get_vector_db().get(where={"$and": [{"date": {"$gte": start_date}}, {"date": {"$lte": end_date}}]})
     if not results["documents"]:
         return f"Không có sự kiện nào từ {start_date} đến {end_date}."
     events_str = "\n".join(f"- {doc}" for doc in results["documents"])
@@ -156,15 +176,18 @@ def add_event_to_calendar(event_name: str, start_time: str, end_time: str, locat
     except Exception:
         rem_ts = 0
 
+    capitalized_name = event_name.capitalize();
+    capitalized_location = location.title() if location else "";
+
     meta = {
-        "date": date_str, "event_name": event_name, "start_time": start_time,
-        "end_time": end_time, "location": location, "reminder_minutes": int(reminder_minutes),
+        "date": date_str, "event_name": capitalized_name, "start_time": start_time,
+        "end_time": end_time, "location": capitalized_location, "reminder_minutes": int(reminder_minutes),
         "reminder_timestamp": rem_ts, 
     }
 
-    text = f"{event_name}. Bắt đầu: {start_time}. Kết thúc: {end_time}."
-    vector_db.add_texts([text], metadatas=[meta])
-    return f"✅ Đã lưu sự kiện '{event_name}'."
+    text = f"{capitalized_name}. Bắt đầu: {start_time}. Kết thúc: {end_time}."
+    get_vector_db().add_texts([text], metadatas=[meta])
+    return f"✅ Đã lưu sự kiện '{capitalized_name}'."
 
 def is_ics_file(file_bytes: bytes) -> bool:
     try: return "BEGIN:VCALENDAR" in file_bytes[:200].decode("utf-8", "ignore").upper()
@@ -200,13 +223,18 @@ def parse_event_with_nvidia(raw_text: str, current_time: str, user_prompt: str =
     Cấu trúc: ["YYYY-MM-DD", "Tên sự kiện", "HH:MM (bắt đầu)", "HH:MM (kết thúc)"]
     Thời gian hiện tại: {current_time}
     Yêu cầu bổ sung: {user_prompt}
+
+    LƯU Ý ĐẶC BIỆT:
+    - Nếu thấy "Ngày hôm sau", hãy chỉ lấy phần giờ (HH:MM). Đừng để chữ "Ngày hôm sau" vào JSON. 
+    - Đảm bảo giờ luôn là định dạng 24h (ví dụ: 5h45 -> 05:45).
     
     VĂN BẢN THÔ CẦN XỬ LÝ:
     ---
     {raw_text}
     ---
     """
-    raw_result = shared_llm.invoke([HumanMessage(content=prompt)]).content.strip()
+    response = shared_llm.invoke([HumanMessage(content=prompt)])
+    raw_result = response.content.strip() if isinstance(response.content, str) else str(response.content).strip()
     try:
         m = re.search(r"\[.*\]", raw_result, flags=re.DOTALL)
         if m: return json.dumps(json.loads(m.group(0)), ensure_ascii=False)
@@ -215,97 +243,76 @@ def parse_event_with_nvidia(raw_text: str, current_time: str, user_prompt: str =
         return f"❌ Lỗi xử lý JSON: {str(e)}"
 
 # =========================================================
-# CHỈ DÙNG MÃ FILE (FILE_HASH) ĐỂ TRUY XUẤT VÀ LƯU (CÓ TỐI ƯU HÀNG LOẠT)
-# =========================================================
-# =========================================================
 # CHỈ DÙNG MÃ FILE (FILE_HASH) ĐỂ TRUY XUẤT VÀ LƯU (CÓ TỐI ƯU HÀNG LOẠT & LOG CONSOLE)
 # =========================================================
 @tool
 def save_events_from_schedule_text(file_hash: str, current_time: str = ""):
-    """Lưu tự động các sự kiện vào CSDL dựa trên mã file_hash. Lỗi sẽ được log ra console."""
+    """Lưu tự động các sự kiện vào CSDL. Tự xử lý lịch xuyên đêm (Ngày hôm sau)."""
     if not current_time: current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
     schedule_text = _PARSED_JSON_CACHE.get(file_hash)
     
     if not schedule_text:
-        print(f"\n[CONSOLE LOG - ERROR] file_hash '{file_hash}' không tồn tại hoặc đã hết hạn.")
         return "❌ Dữ liệu phiên làm việc đã hết hạn. Hãy yêu cầu đọc lại file."
 
     try:
         events = json.loads(schedule_text)
     except Exception as e:
-        print(f"\n[CONSOLE LOG - ERROR] Lỗi parse JSON dữ liệu trong kho: {str(e)}")
-        return "❌ Đã xảy ra sự cố kỹ thuật khi đọc dữ liệu. Vui lòng thử lại."
+        return f"❌ Lỗi cấu trúc dữ liệu: {str(e)}"
 
-    if not events or not isinstance(events, list):
-        return "⚠️ Tui không thấy lịch trình nào hợp lệ để lưu."
+    saved, errors, batch_texts, batch_metas = [], [], [], []
 
-    saved = []
-    errors = []
-    batch_texts = []
-    batch_metas = []
-
-    for idx, ev in enumerate(events, 1):
+    for ev in events:
         if not isinstance(ev, list) or len(ev) < 4: continue
         
         date_val = str(ev[0]).strip()
-        name = str(ev[1]).strip()
+        name = str(ev[1]).strip().capitalize() # Viết hoa đầu câu cho đẹp
         st_time = str(ev[2]).strip()
         et_time = str(ev[3]).strip()
-        st = f"{date_val} {st_time}"
-        et = f"{date_val} {et_time}"
-        loc = str(ev[4]).strip() if len(ev) > 4 and ev[4] else ""
         
+        # 💡 LOGIC XỬ LÝ "NGÀY HÔM SAU"
         try:
-            rem = int(ev[5]) if len(ev) > 5 and ev[5] else 0
+            st_dt = datetime.strptime(f"{date_val} {st_time}", "%Y-%m-%d %H:%M")
+            et_dt = datetime.strptime(f"{date_val} {et_time}", "%Y-%m-%d %H:%M")
+            
+            # Nếu giờ kết thúc <= giờ bắt đầu (vd: 23:20 -> 05:45), tự hiểu là sang ngày hôm sau
+            if et_dt <= st_dt:
+                et_dt += timedelta(days=1)
+            
+            st, et = st_dt.strftime("%Y-%m-%d %H:%M"), et_dt.strftime("%Y-%m-%d %H:%M")
         except:
-            rem = 0
+            st, et = f"{date_val} {st_time}", f"{date_val} {et_time}"
 
-        # Kiểm tra tính hợp lệ
+        loc = str(ev[4]).strip().title() if len(ev) > 4 and ev[4] else ""
+        try: rem = int(ev[5]) if len(ev) > 5 and ev[5] else 0
+        except: rem = 0
+
         check = validate_event_logic(st, et, name, current_time)
         if check != "VALID":
-            errors.append((name, check))  # Gom lỗi lại để in ra console sau
+            errors.append((name, check))
             continue
 
-        try:
-            st_obj = datetime.strptime(st[:16], "%Y-%m-%d %H:%M")
-            rem_obj = st_obj - timedelta(minutes=int(rem))
-            rem_ts = int(rem_obj.timestamp())
-        except Exception:
-            rem_ts = 0
-
+        # Chuẩn bị Metadata để lưu
         meta = {
             "date": date_val, "event_name": name, "start_time": st,
-            "end_time": et, "location": loc, "reminder_minutes": int(rem),
-            "reminder_timestamp": rem_ts, 
+            "end_time": et, "location": loc, "reminder_minutes": rem,
+            "reminder_timestamp": int(datetime.strptime(st, "%Y-%m-%d %H:%M").timestamp() - rem*60), 
         }
-        text = f"{name}. Bắt đầu: {st}. Kết thúc: {et}."
-        
-        batch_texts.append(text)
+        batch_texts.append(f"{name}. Bắt đầu: {st}. Kết thúc: {et}.")
         batch_metas.append(meta)
         saved.append(name)
 
-    # LƯU HÀNG LOẠT
     if batch_texts:
-        try:
-            vector_db.add_texts(batch_texts, metadatas=batch_metas)
-        except Exception as e:
-            print(f"\n[CONSOLE LOG - DB ERROR] Lỗi ghi CSDL hàng loạt: {str(e)}")
-            return "❌ Hệ thống cơ sở dữ liệu đang gặp sự cố. Không thể lưu."
+        get_vector_db().add_texts(batch_texts, metadatas=batch_metas)
 
-    # --- IN LỖI RA CONSOLE (TERMINAL) THAY VÌ HIỂN THỊ LÊN WEB ---
+    # --- BÁO CÁO CHI TIẾT LÊN WEB ---
+    result_msg = f"✅ **Đã lưu thành công {len(saved)} sự kiện.**\n" if saved else "⚠️ **Không có sự kiện nào được lưu.**\n"
     if errors:
-        print("\n" + "="*50)
-        print(f"⚠️ [SYSTEM LOG] BỎ QUA {len(errors)} SỰ KIỆN DO LỖI DỮ LIỆU:")
-        for err_name, err_msg in errors:
-            print(f"  - Sự kiện: '{err_name}' | Nguyên nhân: {err_msg}")
-        print("="*50 + "\n")
-
-    # TRẢ KẾT QUẢ GỌN GÀNG CHO WEB
-    if not saved:
-        return "⚠️ Không có sự kiện nào được lưu thành công."
-        
-    return f"✅ Tui đã lưu thành công {len(saved)} sự kiện vào hệ thống!"
+        result_msg += f"\n❌ **Bỏ qua {len(errors)} sự kiện do lỗi**"
+        print(result_msg)
+        for err_name, err_reason in errors:
+            print(f"- '{err_name}': {err_reason}")
+    
+    return result_msg.strip()
 
 @tool
 def process_schedule_file(file_path: str, current_time: str, user_prompt: str = ""):

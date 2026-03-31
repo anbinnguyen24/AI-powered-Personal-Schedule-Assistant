@@ -6,7 +6,7 @@ load_dotenv()
 
 # Khởi tạo ĐỘNG CƠ DUY NHẤT dùng chung cho toàn bộ hệ thống
 shared_llm = ChatNVIDIA(
-    model="meta/llama-3.3-70b-instruct", 
+    model="openai/gpt-oss-20b", 
     temperature=0,
     max_completion_tokens=4096
 )
