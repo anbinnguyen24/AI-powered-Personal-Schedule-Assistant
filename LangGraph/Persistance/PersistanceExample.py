@@ -1,30 +1,33 @@
-from langgraph.graph import StateGraph, START, END
-from langgraph.checkpoint.memory import InMemorySaver
-from langchain_core.runnables import RunnableConfig
-from typing import Annotated
-from typing_extensions import TypedDict
-from operator import add
+from langgraph.checkpoint.memory import MemorySaver
+from langgraph.graph import MessagesState, StateGraph, START, END
+from langchain_core.messages import HumanMessage, AIMessage
 
-class State(TypedDict):
-    foo: str
-    bar: Annotated[list[str], add]
+def assistant(state: MessagesState):
+    # The assistant simply acknowledges the history
+    return {"messages": [AIMessage(content="I have updated your profile in my memory.")]}
 
-def node_a(state: State):
-    return {"foo": "a", "bar": ["a"]}
+# 1. Initialize Memory Checkpointer
+memory = MemorySaver()
 
-def node_b(state: State):
-    return {"foo": "b", "bar": ["b"]}
+# 2. Build and compile with checkpointer
+workflow = StateGraph(MessagesState)
+workflow.add_node("assistant", assistant)
+workflow.add_edge(START, "assistant")
+workflow.add_edge("assistant", END)
 
+# Integrate the checkpointer during compilation
+app = workflow.compile(checkpointer=memory)
 
-workflow = StateGraph(State)
-workflow.add_node(node_a)
-workflow.add_node(node_b)
-workflow.add_edge(START, "node_a")
-workflow.add_edge("node_a", "node_b")
-workflow.add_edge("node_b", END)
+# 3. Execution with Thread ID
+config = {"configurable": {"thread_id": "session_123"}}
 
-checkpointer = InMemorySaver()
-graph = workflow.compile(checkpointer=checkpointer)
+# First interaction
+print("--- Round 1: Introduction ---")
+app.invoke({"messages": [HumanMessage(content="Hi, I am an Engineer.")]}, config)
 
-config: RunnableConfig = {"configurable": {"thread_id": "1"}}
-graph.invoke({"foo": "", "bar":[]}, config)
+# Second interaction (The system remembers context via thread_id)
+print("--- Round 2: Memory Check ---")
+final_state = app.invoke({"messages": [HumanMessage(content="Do you remember my job?")]}, config)
+
+for m in final_state["messages"]:
+    m.pretty_print()
