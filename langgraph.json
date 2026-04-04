@@ -1,8 +1,0 @@
-{
-  "checkpointer": {
-    "type": "postgres"
-  },
-  "store": {
-    "type": "postgres"
-  }
-}
