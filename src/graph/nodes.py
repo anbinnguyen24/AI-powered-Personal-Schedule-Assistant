@@ -1,38 +1,135 @@
-from src.tools.google_calendar import calendar_tools
-from src.tools.user_db import get_user_info
-from src.tools.web_search import research_topic
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_openai import ChatOpenAI
-import os
 
-def create_scheduling_workflow():
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise ValueError("Chưa tìm thấy HF_TOKEN trong file .env!")
-    model = ChatOpenAI(
-        base_url="https://router.huggingface.co/v1",
-        api_key= hf_token,
-        model="Qwen/Qwen2.5-72B-Instruct",
-        temperature=0
-    )
+import re
+from datetime import datetime, timedelta, timezone
+from typing import Any
+from agents import calendar_agent, research_agent, scheduling_agent
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
 
-    all_tools = calendar_tools + [get_user_info, research_topic]
+from src.graph.state import AgentState
 
-    system_prompt = """Bạn là trợ lý ảo quản lý lịch trình cá nhân cực kỳ thông minh.
 
-    QUY TẮC LÀM VIỆC:
-    1. TÔN TRỌNG NGƯỜI DÙNG: Nếu người dùng yêu cầu giờ giấc cụ thể (VD: 9h sáng, 2h chiều), BẮT BUỘC phải lấy đúng giờ đó để tra cứu và đặt lịch. Không tự ý đổi giờ của họ.
-    2. SỬ DỤNG TOOL: Dùng công cụ Google Calendar để kiểm tra xem giờ đó có bị trùng lịch không. 
-    3. ĐỀ XUẤT: Sau khi kiểm tra, tổng hợp lại bằng tiếng Việt (Thời gian, địa điểm, sự kiện) và hỏi: "Bạn có đồng ý để tôi tạo lịch này trên Google Calendar không?".
-    4. TẠO LỊCH: Chỉ dùng tool tạo sự kiện khi người dùng gõ "Đồng ý", "OK", "Tạo đi".
+# ============================================================================
+# NODE 1: SUPERVISOR NODE
+# ============================================================================
+def call_supervisor_node(state: AgentState) -> AgentState:
+    """ 
+    Nút giám sát chính: Phân tích yêu cầu và xác định nên gửi tới agent nào.
+    
+    Input:
+        - state["messages"]: Lịch sử hội thoại
+        
+    Output:
+        - state["next_worker"]: Xác định agent tiếp theo (calendar_agent, research_agent, execute_booking, hoặc None)
+        - state["messages"]: Thêm response từ supervisor
     """
+    # TODO: Implement supervisor logic
+    # 1. Get latest user message
+    # 2. Analyze the request to determine which agent should handle it
+    # 3. Set state["next_worker"] = "calendar_agent" | "research_agent" | "execute_booking" | None
+    # 4. Return updated state
+    
+    latest_message = state["messages"][-1]
+    
+    # Placeholder response
+    supervisor_response = AIMessage(content="[Supervisor processing...]")
+    
+    return {
+        "messages": state["messages"] + [supervisor_response],
+        "next_worker": "calendar_agent"  # TODO: Replace with actual logic
+    }
 
-    app = create_react_agent(
-        model,
-        tools=all_tools,
-        state_modifier=system_prompt,
-        checkpointer=MemorySaver()
-    )
 
-    return app
+# ============================================================================
+# NODE 2: CALENDAR EXPERT NODE
+# ============================================================================
+def call_calendar_node(state: AgentState) -> AgentState:
+    """
+    Nút chuyên gia lịch: Xử lý các công việc liên quan đến quản lý calendar.
+    
+    Input:
+        - state["messages"]: Lịch sử hội thoại
+        
+    Output:
+        - state["messages"]: Thêm response từ calendar agent
+        - state["next_worker"]: Trả về "supervisor" để tiếp tục quy trình
+    """
+    # TODO: Implement calendar agent logic
+    # 1. Parse the user request
+    # 2. Check current calendar events
+    # 3. Extract tasks/events to handle
+    # 4. Call calendar_agent to process
+    # 5. Return result to supervisor
+    
+    latest_message = state["messages"][-1]
+    
+    # Placeholder response
+    calendar_response = AIMessage(content="[Calendar expert processing...]")
+    
+    return {
+        "messages": state["messages"] + [calendar_response],
+        "next_worker": "supervisor"
+    }
+
+
+# ============================================================================
+# NODE 3: RESEARCHER NODE  
+# ============================================================================
+def call_research_node(state: AgentState) -> AgentState:
+    """
+    Nút nhà nghiên cứu: Tìm kiếm thông tin hoặc phân tích dữ liệu.
+    
+    Input:
+        - state["messages"]: Lịch sử hội thoại
+        
+    Output:
+        - state["messages"]: Thêm response từ research agent
+        - state["next_worker"]: Trả về "supervisor" để tiếp tục quy trình
+    """
+    # TODO: Implement research agent logic
+    # 1. Parse the research request
+    # 2. Perform web search if needed
+    # 3. Analyze retrieved information
+    # 4. Call research_agent to process
+    # 5. Return findings to supervisor
+    
+    latest_message = state["messages"][-1]
+    
+    # Placeholder response
+    research_response = AIMessage(content="[Researcher processing...]")
+    
+    return {
+        "messages": state["messages"] + [research_response],
+        "next_worker": "supervisor"
+    }
+
+
+# ============================================================================
+# NODE 4: BOOKING/EXECUTION NODE
+# ============================================================================
+def execute_booking_node(state: AgentState) -> AgentState:
+    """
+    Nút thực thi: Chốt lịch và thực hiện hành động cuối cùng.
+    
+    Input:
+        - state["messages"]: Lịch sử hội thoại
+        
+    Output:
+        - state["messages"]: Thêm response xác nhận booking
+    """
+    # TODO: Implement booking execution logic
+    # 1. Get the confirmed schedule choice
+    # 2. Check for conflicts one final time
+    # 3. Create calendar event
+    # 4. Save to database if needed
+    # 5. Return confirmation message
+    
+    latest_message = state["messages"][-1]
+    
+    # Placeholder response
+    booking_response = AIMessage(content="[Booking confirmed and executed...]")
+    
+    return {
+        "messages": state["messages"] + [booking_response]
+    }
+
+
