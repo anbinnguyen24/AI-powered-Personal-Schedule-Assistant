@@ -3,14 +3,20 @@ import time
 import random
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings, ChatNVIDIA
 
-def create_chat_llm(model='meta/llama-3.1-70b-instruct', temperature=0.0):
+def create_chat_llm(temperature=0.0):
     return ChatNVIDIA(
-        model=model,
+        model='meta/llama-3.1-70b-instruct',
         nvidia_api_key=os.environ.get('NVIDIA_API_KEY'),
         temperature=temperature,
     )
 
-def invoke_with_retry(llm, prompt, max_retries=5):
+def create_embeddings():
+    return NVIDIAEmbeddings(
+        model='nvidia/nv-embed-v1',
+        nvidia_api_key=os.environ.get('NVIDIA_API_KEY')
+    )
+
+def invoke_with_retry(llm, prompt, max_retries=6):
     for attempt in range(max_retries):
         try:
             return llm.invoke(prompt)
