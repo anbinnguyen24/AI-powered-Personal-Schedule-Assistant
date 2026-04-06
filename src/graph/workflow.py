@@ -6,7 +6,9 @@ from src.graph.nodes import (
     call_research_node,
     # execute_booking_node
 )
-
+from langgraph.checkpoint.memory import MemorySaver
+memory = MemorySaver()
+config = {"configurable": {"thread_id": "user_id_123"}}
 def build_schedule_assistant_graph():
     workflow = StateGraph(AgentState)
     workflow.add_node("supervisor", call_supervisor_node)
@@ -35,4 +37,4 @@ def build_schedule_assistant_graph():
     workflow.add_edge("calendar_expert", "supervisor")
     workflow.add_edge("researcher", "supervisor")
 
-    return workflow.compile()
+    return workflow.compile(checkpointer=memory)

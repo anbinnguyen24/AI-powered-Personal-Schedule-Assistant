@@ -27,3 +27,4 @@ ddgs
 langchain-nvidia-ai-endpoints 
 langchain-unstructured
 datefinder
+streamlit-autorefresh

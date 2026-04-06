@@ -16,18 +16,15 @@ def supervisor_node(state, llm):
         ("system", SUPERVISOR_SYSTEM_PROMPT),
         MessagesPlaceholder(variable_name="messages"),
     ])
-
-    # Sử dụng StrOutputParser để lấy chuỗi văn bản thuần túy thay vì Structured Output
     chain = prompt | llm | StrOutputParser()
     raw_result = chain.invoke({"messages": state["messages"]})
 
-    # Làm sạch dữ liệu (Xóa khoảng trắng, dấu nháy nếu LLM lỡ sinh ra)
-    clean_result = raw_result.strip().strip("'\"").replace(" ", "")
-
-    # Fallback an toàn
-    valid_options = ["CalendarAgent", "ResearchAgent", "FINISH"]
-    if clean_result not in valid_options:
-        print(f"[Supervisor] Model trả về sai format: '{clean_result}'. Mặc định chọn FINISH.")
+    # Tìm kiếm từ khóa thay vì xóa khoảng trắng
+    if "CalendarAgent" in raw_result:
+        clean_result = "CalendarAgent"
+    elif "ResearchAgent" in raw_result:
+        clean_result = "ResearchAgent"
+    else:
         clean_result = "FINISH"
 
     print(f"[Supervisor] Quyết định: {clean_result}")

@@ -3,8 +3,26 @@ import uuid
 import time
 from datetime import datetime
 import os
-
 from streamlit_autorefresh import st_autorefresh
+import streamlit as st
+import uuid
+import time
+from datetime import datetime
+import os
+from langchain_chroma import Chroma
+from src.utils.llm_utils import create_embeddings
+from src.graph.workflow import build_schedule_assistant_graph
+
+def get_vector_db():
+    """Khởi tạo kết nối tới ChromaDB sử dụng HuggingFace Embeddings"""
+    embeddings = create_embeddings()
+    return Chroma(
+        persist_directory="./chroma_db",
+        embedding_function=embeddings,
+        collection_name='personal_schedule'
+    )
+
+
 
 # =====================================
 # CONFIG
@@ -207,7 +225,7 @@ if user_input := st.chat_input("Hôm nay tui có lịch gì không?", accept_fil
 
                 # 4. Bắt đầu gọi Agent
                 try:
-                    agent = get_main_agent()
+                    agent = build_schedule_assistant_graph()
                     # Vòng lặp này sẽ chặn (block) code cho đến khi Agent chạy xong toàn bộ (bao gồm cả các tool lưu file/sự kiện)
                     for chunk in agent.stream(
                         {"messages": [("human", enhanced_prompt)]},
