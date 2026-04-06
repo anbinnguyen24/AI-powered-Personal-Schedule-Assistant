@@ -24,6 +24,6 @@ sentence-transformers>=3.0.0
 langchain-huggingface>=0.0.3
 langchain-chroma
 ddgs
-langchain-nvidia
+langchain-nvidia-ai-endpoints 
 langchain-unstructured
 datefinder
