@@ -1,11 +1,8 @@
 import uuid
-
 import streamlit as st
 from dotenv import load_dotenv
 from langgraph.types import Command
-
-from DeepAgents.agent import create_schedule_advisor
-
+from src.agent import create_schedule_advisor
 load_dotenv()
 
 # ── Subagent name mapping cho hiển thị đẹp ──

@@ -1,38 +1,36 @@
-from src.tools.google_calendar import calendar_tools
-from src.tools.user_db import get_user_info
-from src.tools.web_search import research_topic
-from langgraph.prebuilt import create_react_agent
-from langgraph.checkpoint.memory import MemorySaver
-from langchain_openai import ChatOpenAI
-import os
+import json
+from langchain_core.messages import SystemMessage
+from langchain_core.runnables import RunnableConfig
+from src.tools.preferences_tool import DEFAULT_PREFERENCES
+from src.graph.state import OuterAgentState
 
-def create_scheduling_workflow():
-    hf_token = os.environ.get("HF_TOKEN")
-    if not hf_token:
-        raise ValueError("Chưa tìm thấy HF_TOKEN trong file .env!")
-    model = ChatOpenAI(
-        base_url="https://router.huggingface.co/v1",
-        api_key= hf_token,
-        model="Qwen/Qwen2.5-72B-Instruct",
-        temperature=0
+
+def load_preference_node(state: OuterAgentState):
+    """Node ép buộc nạp hồ sơ người dùng vào SystemMessage trước khi xử lý."""
+    has_preference = any(
+        isinstance(msg, SystemMessage) and "[HỒ SƠ CÁ NHÂN NGƯỜI DÙNG]" in msg.content
+        for msg in state["messages"]
     )
 
-    all_tools = calendar_tools + [get_user_info, research_topic]
+    if not has_preference:
+        prefs = json.dumps(DEFAULT_PREFERENCES, ensure_ascii=False, indent=2)
+        sys_msg = SystemMessage(
+            content=f"[HỒ SƠ CÁ NHÂN NGƯỜI DÙNG]\n{prefs}\n(SOP: Luôn ưu tiên dùng thông tin này để tư vấn lịch trình)"
+        )
+        return {"messages": [sys_msg]}
 
-    system_prompt = """Bạn là trợ lý ảo quản lý lịch trình cá nhân cực kỳ thông minh.
+    return {}
 
-    QUY TẮC LÀM VIỆC:
-    1. TÔN TRỌNG NGƯỜI DÙNG: Nếu người dùng yêu cầu giờ giấc cụ thể (VD: 9h sáng, 2h chiều), BẮT BUỘC phải lấy đúng giờ đó để tra cứu và đặt lịch. Không tự ý đổi giờ của họ.
-    2. SỬ DỤNG TOOL: Dùng công cụ Google Calendar để kiểm tra xem giờ đó có bị trùng lịch không. 
-    3. ĐỀ XUẤT: Sau khi kiểm tra, tổng hợp lại bằng tiếng Việt (Thời gian, địa điểm, sự kiện) và hỏi: "Bạn có đồng ý để tôi tạo lịch này trên Google Calendar không?".
-    4. TẠO LỊCH: Chỉ dùng tool tạo sự kiện khi người dùng gõ "Đồng ý", "OK", "Tạo đi".
-    """
 
-    app = create_react_agent(
-        model,
-        tools=all_tools,
-        state_modifier=system_prompt,
-        checkpointer=MemorySaver()
-    )
+def get_execute_deep_agent_node(deep_agent):
+    """Factory Pattern: Trả về hàm thực thi Node lồng ghép DeepAgent."""
 
-    return app
+    def execute_deep_agent_node(state: OuterAgentState, config: RunnableConfig):
+        # Đồng bộ config (Store/ThreadID) từ LangGraph vòng ngoài vào DeepAgent vòng trong
+        response = deep_agent.invoke({"messages": state["messages"]}, config=config)
+
+        # Chỉ trả về những message mới do Agent sinh ra
+        new_messages = response["messages"][len(state["messages"]):]
+        return {"messages": new_messages}
+
+    return execute_deep_agent_node

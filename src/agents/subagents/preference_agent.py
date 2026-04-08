@@ -1,4 +1,4 @@
-from DeepAgents.prompts.preference_agent import PREFERENCE_AGENT_PROMPT
+from src.prompts.preference_agent import PREFERENCE_AGENT_PROMPT
 
 preference_subagent = {
     "name": "preference-agent",

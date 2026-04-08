@@ -1,5 +1,5 @@
-from DeepAgents.prompts.calendar_agent import CALENDAR_AGENT_PROMPT
-from DeepAgents.tools.calendar_tool import get_calendar_tools
+from src.prompts.calendar_agent import CALENDAR_AGENT_PROMPT
+from src.tools.calendar_tool import get_calendar_tools
 
 calendar_subagent = {
     "name": "calendar-agent",

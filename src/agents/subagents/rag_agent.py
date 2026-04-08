@@ -1,5 +1,5 @@
-from DeepAgents.prompts.rag_agent import RAG_AGENT_PROMPT
-from DeepAgents.tools.rag_tool import search_knowledge_base
+from src.prompts.rag_agent import RAG_AGENT_PROMPT
+from src.tools.rag_tool import search_knowledge_base
 
 rag_subagent = {
     "name": "rag-agent",

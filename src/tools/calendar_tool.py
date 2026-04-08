@@ -13,7 +13,7 @@ from langchain_google_community.calendar.utils import (
 _DEEPAGENTS_DIR = os.path.dirname(os.path.dirname(__file__))
 _PROJECT_ROOT = os.path.dirname(_DEEPAGENTS_DIR)
 
-# Tìm credentials.json và token.json (ưu tiên DeepAgents/, fallback project root)
+# Tìm credentials.json và token.json (ưu tiên src/, fallback project root)
 _CREDENTIALS_FILE = os.path.join(_DEEPAGENTS_DIR, "credentials.json")
 if not os.path.exists(_CREDENTIALS_FILE):
     _CREDENTIALS_FILE = os.path.join(_PROJECT_ROOT, "credentials.json")

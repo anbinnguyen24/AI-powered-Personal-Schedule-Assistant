@@ -1,4 +1,4 @@
-from DeepAgents.config.settings import CURRENT_TIME_STR
+from src.config.settings import CURRENT_TIME_STR
 
 
 CALENDAR_AGENT_PROMPT = (
